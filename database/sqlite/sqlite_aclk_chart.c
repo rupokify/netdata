@@ -169,6 +169,97 @@ int aclk_add_chart_event(struct aclk_database_worker_config *wc, struct aclk_dat
     return rc;
 }
 
+static inline int aclk_upd_dimension_event(char *node_id, char *uuid_str, char *claim_id, uuid_t *dim_uuid,
+        const char *dim_id, const char *dim_name, const char *chart_name, time_t first_time, time_t last_time)
+{
+#ifdef ENABLE_NEW_CLOUD_PROTOCOL
+    int rc = 0;
+    size_t size;
+
+    struct chart_dimension_updated dim_payload;
+    memset(&dim_payload, 0, sizeof(dim_payload));
+
+    if (!first_time)
+        info("DEBUG: Deleting dimension [%s] [%s] [%s] [%s] [%s]", node_id, claim_id, dim_id, dim_name, chart_name);
+    dim_payload.node_id = node_id;
+    dim_payload.claim_id = claim_id;
+    dim_payload.name = dim_name;
+    dim_payload.id = dim_id;
+    dim_payload.chart_id = chart_name;
+    dim_payload.created_at.tv_sec = first_time;
+    dim_payload.last_timestamp.tv_sec = last_time;
+    char *payload = generate_chart_dimension_updated(&size, &dim_payload);
+    if (likely(payload))
+        rc = aclk_add_chart_payload(uuid_str, dim_uuid, claim_id, ACLK_PAYLOAD_DIMENSION, (void *)payload, size);
+    freez(payload);
+    return rc;
+#else
+    UNUSED(wc);
+    UNUSED(cmd);
+    return 0;
+#endif
+}
+
+void aclk_process_dimension_deletion(struct aclk_database_worker_config *wc, struct aclk_database_cmd cmd)
+{
+#ifdef ENABLE_NEW_CLOUD_PROTOCOL
+    int rc = 0;
+    sqlite3_stmt *res = NULL;
+
+    if (!aclk_use_new_cloud_arch || !aclk_connected)
+        return;
+
+    if (unlikely(!db_meta))
+        return;
+
+    char *claim_id = is_agent_claimed();
+    if (!claim_id)
+        return;
+
+    rc = sqlite3_prepare_v2(db_meta, "DELETE FROM dimension_delete " \
+            "RETURNING dimension_id, dimension_name, chart_name, dim_id LIMIT 10;", -1, &res, 0);
+
+    if (rc != SQLITE_OK) {
+        error_report("Failed to prepare statement when trying to delete dimension deletes");
+        freez(claim_id);
+        return;
+    }
+
+    unsigned count = 0;
+    while (sqlite3_step(res) == SQLITE_ROW) {
+        (void) aclk_upd_dimension_event(
+            wc->node_id,
+            wc->uuid_str,
+            claim_id,
+            (uuid_t *)sqlite3_column_text(res, 3),
+            (const char *)sqlite3_column_text(res, 0),
+            (const char *)sqlite3_column_text(res, 1),
+            (const char *)sqlite3_column_text(res, 2),
+            0,
+            0);
+        count++;
+    }
+
+    rc = sqlite3_finalize(res);
+    if (unlikely(rc != SQLITE_OK))
+        error_report("Failed to finalize statement when adding dimension deletion events, rc = %d", rc);
+    freez(claim_id);
+
+    if (count) {
+        info("DEBUG: processed %u dimension deletions", count);
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = ACLK_DATABASE_DIM_DELETION;
+        if (aclk_database_enq_cmd_noblock(wc, &cmd))
+            info("Failed to queue a dimension deletion message");
+    }
+#else
+    UNUSED(wc);
+    UNUSED(cmd);
+#endif
+    return;
+}
+
+
 int aclk_add_dimension_event(struct aclk_database_worker_config *wc, struct aclk_database_cmd cmd)
 {
     int rc = 0;
@@ -187,24 +278,17 @@ int aclk_add_dimension_event(struct aclk_database_worker_config *wc, struct aclk
 
         int live = ((now - last_t) < (RRDSET_MINIMUM_LIVE_COUNT * rd->update_every));
 
-        struct chart_dimension_updated dim_payload;
-        size_t size;
+        rc = aclk_upd_dimension_event(
+            wc->node_id,
+            wc->uuid_str,
+            claim_id,
+            &rd->state->metric_uuid,
+            rd->id,
+            rd->name,
+            rd->rrdset->name,
+            first_t,
+            live ? 0 : last_t);
 
-        memset(&dim_payload, 0, sizeof(dim_payload));
-        dim_payload.node_id = wc->node_id;
-        dim_payload.claim_id = claim_id;
-        dim_payload.name = rd->name;
-        dim_payload.id = rd->id;
-
-        dim_payload.chart_id = rd->rrdset->name;
-        dim_payload.created_at.tv_sec = first_t;
-        if (unlikely(!live))
-            dim_payload.last_timestamp.tv_sec = last_t;
-
-        char *payload = generate_chart_dimension_updated(&size, &dim_payload);
-        if (likely(payload))
-            rc = aclk_add_chart_payload(wc->uuid_str, &rd->state->metric_uuid, claim_id, ACLK_PAYLOAD_DIMENSION, (void *)payload, size);
-        freez(payload);
         freez(claim_id);
     }
     rrddim_flag_clear(rd, RRDDIM_FLAG_ACLK);
@@ -269,6 +353,8 @@ void aclk_send_chart_event(struct aclk_database_worker_config *wc, struct aclk_d
 
     int loop = cmd.param1;
 
+    uint64_t start_sequence_id = wc->chart_sequence_id;
+
     while (loop > 0) {
         uint64_t previous_sequence_id = wc->chart_sequence_id;
         int count = 0;
@@ -326,6 +412,15 @@ void aclk_send_chart_event(struct aclk_database_worker_config *wc, struct aclk_d
             wc->chart_timestamp = last_timestamp;
         }
         --loop;
+    }
+
+    if (start_sequence_id != wc->chart_sequence_id) {
+        time_t now = now_realtime_sec();
+        if (wc->rotation_after > now && wc->rotation_after < now + ACLK_DATABASE_ROTATION_DELAY) {
+            info("DEBUG: Delaying rotation message for %s (sync in progress) to %ld", wc->host_guid,
+                 now + ACLK_DATABASE_ROTATION_DELAY);
+            wc->rotation_after = now + ACLK_DATABASE_ROTATION_DELAY;
+        }
     }
 
     for (int i = 0; i <= limit; ++i)
@@ -781,6 +876,185 @@ void aclk_start_streaming(char *node_id, uint64_t sequence_id, time_t created_at
     UNUSED(node_id);
     UNUSED(sequence_id);
     UNUSED(batch_id);
+#endif
+    return;
+}
+
+
+#define SQL_SELECT_HOST_MEMORY_MODE "SELECT memory_mode FROM chart WHERE host_id = @host_id LIMIT 1;"
+
+static RRD_MEMORY_MODE sql_get_host_memory_mode(uuid_t *host_id)
+{
+    int rc;
+
+    RRD_MEMORY_MODE memory_mode = RRD_MEMORY_MODE_RAM;
+    sqlite3_stmt *res = NULL;
+
+    rc = sqlite3_prepare_v2(db_meta, SQL_SELECT_HOST_MEMORY_MODE, -1, &res, 0);
+
+    if (unlikely(rc != SQLITE_OK)) {
+        error_report("Failed to prepare statement to read host memory mode");
+        return memory_mode;
+    }
+
+    rc = sqlite3_bind_blob(res, 1, host_id, sizeof(*host_id), SQLITE_STATIC);
+    if (unlikely(rc != SQLITE_OK)) {
+        error_report("Failed to bind host parameter to fetch host memory mode");
+        goto failed;
+    }
+
+    while (sqlite3_step(res) == SQLITE_ROW) {
+        memory_mode = (RRD_MEMORY_MODE) sqlite3_column_int(res, 0);
+    }
+
+failed:
+    rc = sqlite3_finalize(res);
+    if (unlikely(rc != SQLITE_OK))
+        error_report("Failed to finalize the prepared statement when reading host memory mode");
+    return memory_mode;
+}
+
+#define SELECT_HOST_DIMENSION_LIST  "SELECT d.dim_id, c.update_every, c.type||'.'||c.id, d.id, d.name FROM chart c, dimension d " \
+        "WHERE d.chart_id = c.chart_id AND c.host_id = @host_id ORDER BY c.update_every ASC;"
+
+#define SELECT_HOST_CHART_LIST  "SELECT distinct h.host_id, c.update_every, c.type||'.'||c.id FROM chart c, host h " \
+        "WHERE c.host_id = h.host_id AND c.host_id = @host_id ORDER BY c.update_every ASC;"
+
+void aclk_update_retention(struct aclk_database_worker_config *wc, struct aclk_database_cmd cmd)
+{
+    UNUSED(cmd);
+#ifdef ENABLE_NEW_CLOUD_PROTOCOL
+    int rc;
+
+    if (!aclk_use_new_cloud_arch || !aclk_connected)
+        return;
+
+    char *claim_id = is_agent_claimed();
+    if (unlikely(!claim_id))
+        return;
+
+    sqlite3_stmt *res = NULL;
+    RRD_MEMORY_MODE memory_mode;
+
+    uuid_t host_uuid;
+    rc = uuid_parse(wc->host_guid, host_uuid);
+    if (unlikely(rc)) {
+        freez(claim_id);
+        return;
+    }
+
+    if (wc->host)
+        memory_mode = wc->host->rrd_memory_mode;
+    else
+        memory_mode = sql_get_host_memory_mode(&host_uuid);
+
+    if (memory_mode == RRD_MEMORY_MODE_DBENGINE)
+        rc = sqlite3_prepare_v2(db_meta, SELECT_HOST_DIMENSION_LIST, -1, &res, 0);
+    else
+        rc = sqlite3_prepare_v2(db_meta, SELECT_HOST_CHART_LIST, -1, &res, 0);
+
+    if (unlikely(rc != SQLITE_OK)) {
+        error_report("Failed to prepare statement to fetch host dimensions");
+        freez(claim_id);
+        return;
+    }
+
+    rc = sqlite3_bind_blob(res, 1, &host_uuid, sizeof(host_uuid), SQLITE_STATIC);
+    if (unlikely(rc != SQLITE_OK)) {
+        error_report("Failed to bind host parameter to fetch host dimensions");
+        goto failed;
+    }
+
+    time_t  start_time = LONG_MAX;
+    time_t  first_entry_t;
+    time_t  last_entry_t;
+    uint32_t update_every = 0;
+
+    struct retention_updated rotate_data;
+
+    memset(&rotate_data, 0, sizeof(rotate_data));
+
+    int max_intervals = 32;
+
+    rotate_data.interval_duration_count = 0;
+    rotate_data.interval_durations = callocz(max_intervals, sizeof(*rotate_data.interval_durations));
+
+    now_realtime_timeval(&rotate_data.rotation_timestamp);
+    rotate_data.memory_mode = memory_mode;
+    rotate_data.claim_id = claim_id;
+    rotate_data.node_id = strdupz(wc->node_id);
+
+//    time_t now = now_realtime_sec();
+    while (sqlite3_step(res) == SQLITE_ROW) {
+        if (!update_every || update_every != (uint32_t) sqlite3_column_int(res, 1)) {
+            if (update_every) {
+                debug(D_ACLK_SYNC,"Update %s for %u oldest time = %ld", wc->host_guid, update_every, start_time);
+                rotate_data.interval_durations[rotate_data.interval_duration_count].retention = rotate_data.rotation_timestamp.tv_sec - start_time;
+                rotate_data.interval_duration_count++;
+            }
+            update_every = (uint32_t) sqlite3_column_int(res, 1);
+            rotate_data.interval_durations[rotate_data.interval_duration_count].update_every = update_every;
+            start_time = LONG_MAX;
+        }
+#ifdef ENABLE_DBENGINE
+        if (memory_mode == RRD_MEMORY_MODE_DBENGINE)
+            rc = rrdeng_metric_latest_time_by_uuid((uuid_t *)sqlite3_column_blob(res, 0), &first_entry_t, &last_entry_t);
+        else
+#endif
+        {
+            if (wc->host) {
+                RRDSET *st = NULL;
+                rc = (st = rrdset_find(wc->host, (const char *)sqlite3_column_text(res, 2))) ? 0 : 1;
+                if (!rc) {
+                    first_entry_t = rrdset_first_entry_t(st);
+                    last_entry_t = rrdset_last_entry_t(st);
+                }
+            }
+            else {
+                rc = 0;
+                first_entry_t = rotate_data.rotation_timestamp.tv_sec;
+            }
+        }
+
+        if (likely(!rc && first_entry_t))
+            start_time = MIN(start_time, first_entry_t);
+
+//        if (memory_mode == RRD_MEMORY_MODE_DBENGINE) {
+//            int live = ((now - last_entry_t) < (RRDSET_MINIMUM_LIVE_COUNT * update_every));
+//            (void) aclk_upd_dimension_event(
+//                wc->uuid_str,
+//                claim_id,
+//                (uuid_t *)sqlite3_column_blob(res, 0),
+//                (const char *)(const char *)sqlite3_column_text(res, 3),
+//                (const char *)(const char *)sqlite3_column_text(res, 4),
+//                (const char *)(const char *)sqlite3_column_text(res, 2),
+//                first_entry_t,
+//                live ? 0 : last_entry_t);
+//        }
+    }
+    if (update_every) {
+        debug(D_ACLK_SYNC, "Update %s for %u oldest time = %ld", wc->host_guid, update_every, start_time);
+        rotate_data.interval_durations[rotate_data.interval_duration_count].retention = rotate_data.rotation_timestamp.tv_sec - start_time;
+        rotate_data.interval_duration_count++;
+    }
+
+    for (int i = 0; i < rotate_data.interval_duration_count; ++i) {
+        debug(D_ACLK_SYNC,"%d --> Update %s for %u  Retention = %u", i, wc->host_guid,
+              rotate_data.interval_durations[i].update_every, rotate_data.interval_durations[i].retention);
+        info("DEBUG: %d --> Update %s for %u  Retention = %u", i, wc->host_guid,
+              rotate_data.interval_durations[i].update_every, rotate_data.interval_durations[i].retention);
+    };
+    aclk_retention_updated(&rotate_data);
+    freez(rotate_data.node_id);
+    freez(rotate_data.interval_durations);
+
+failed:
+    freez(claim_id);
+    rc = sqlite3_finalize(res);
+    if (unlikely(rc != SQLITE_OK))
+        error_report("Failed to finalize the prepared statement when reading host dimensions");
+#else
+    UNUSED(wc);
 #endif
     return;
 }

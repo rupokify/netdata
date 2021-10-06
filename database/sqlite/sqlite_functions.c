@@ -45,6 +45,13 @@ const char *database_config[] = {
     "INSERT INTO chart_hash_map (chart_id, hash_id) values (new.chart_id, new.hash_id) "
     "on conflict (chart_id, hash_id) do nothing; END; ",
 
+    "CREATE TABLE IF NOT EXISTS dimension_delete (dimension_id, dimension_name, chart_name, dim_id, date_created);",
+
+    "CREATE TRIGGER IF NOT EXISTS tr_dim_del AFTER DELETE ON dimension BEGIN INSERT INTO dimension_delete "
+    "(dimension_id, dimension_name, chart_name, dim_id, date_created)"
+    " select old.id, old.name, c.type||\".\"||c.id, old.dim_id, strftime('%s') FROM"
+    " chart c WHERE c.chart_id = old.chart_id; END;"
+
     "delete from chart_active;",
     "delete from dimension_active;",
     "delete from chart where chart_id not in (select chart_id from dimension);",
