@@ -172,7 +172,7 @@ int aclk_add_chart_event(struct aclk_database_worker_config *wc, struct aclk_dat
     return rc;
 }
 
-static inline int aclk_upd_dimension_event(char *node_id, char *uuid_str, char *claim_id, uuid_t *dim_uuid,
+static inline int aclk_upd_dimension_event(struct aclk_database_worker_config *wc, char *claim_id, uuid_t *dim_uuid,
         const char *dim_id, const char *dim_name, const char *chart_name, time_t first_time, time_t last_time)
 {
 #ifdef ENABLE_NEW_CLOUD_PROTOCOL
@@ -183,8 +183,8 @@ static inline int aclk_upd_dimension_event(char *node_id, char *uuid_str, char *
     memset(&dim_payload, 0, sizeof(dim_payload));
 
     if (!first_time)
-        info("DEBUG: Deleting dimension [%s] [%s] [%s] [%s] [%s]", node_id, claim_id, dim_id, dim_name, chart_name);
-    dim_payload.node_id = node_id;
+        info("DEBUG: Deleting dimension [%s] [%s] [%s] [%s] [%s]", wc->node_id, claim_id, dim_id, dim_name, chart_name);
+    dim_payload.node_id = wc->node_id;
     dim_payload.claim_id = claim_id;
     dim_payload.name = dim_name;
     dim_payload.id = dim_id;
@@ -193,7 +193,7 @@ static inline int aclk_upd_dimension_event(char *node_id, char *uuid_str, char *
     dim_payload.last_timestamp.tv_sec = last_time;
     char *payload = generate_chart_dimension_updated(&size, &dim_payload);
     if (likely(payload))
-        rc = aclk_add_chart_payload(uuid_str, dim_uuid, claim_id, ACLK_PAYLOAD_DIMENSION, (void *)payload, size);
+        rc = aclk_add_chart_payload(wc, dim_uuid, claim_id, ACLK_PAYLOAD_DIMENSION, (void *)payload, size);
     freez(payload);
     return rc;
 #else
@@ -231,8 +231,7 @@ void aclk_process_dimension_deletion(struct aclk_database_worker_config *wc, str
     unsigned count = 0;
     while (sqlite3_step(res) == SQLITE_ROW) {
         (void) aclk_upd_dimension_event(
-            wc->node_id,
-            wc->uuid_str,
+            wc,
             claim_id,
             (uuid_t *)sqlite3_column_text(res, 3),
             (const char *)sqlite3_column_text(res, 0),
@@ -282,8 +281,7 @@ int aclk_add_dimension_event(struct aclk_database_worker_config *wc, struct aclk
         int live = ((now - last_t) < (RRDSET_MINIMUM_LIVE_COUNT * rd->update_every));
 
         rc = aclk_upd_dimension_event(
-            wc->node_id,
-            wc->uuid_str,
+            wc,
             claim_id,
             &rd->state->metric_uuid,
             rd->id,
