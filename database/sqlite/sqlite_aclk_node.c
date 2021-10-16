@@ -5,7 +5,7 @@
 
 #ifdef ENABLE_NEW_CLOUD_PROTOCOL
 #include "../../aclk/aclk_charts_api.h"
-#include "../../aclk/aclk.h"
+//#include "../../aclk/aclk.h"
 #endif
 
 void sql_build_node_info(struct aclk_database_worker_config *wc, struct aclk_database_cmd cmd)
