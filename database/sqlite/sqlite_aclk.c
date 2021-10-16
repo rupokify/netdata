@@ -86,6 +86,7 @@ int aclk_database_enq_cmd_noblock(struct aclk_database_worker_config *wc, struct
     uv_mutex_lock(&wc->cmd_mutex);
     if ((queue_size = wc->queue_size) == ACLK_DATABASE_CMD_Q_MAX_SIZE) {
         uv_mutex_unlock(&wc->cmd_mutex);
+        info("DEBUG: %s command queue is full", wc->uuid_str);
         return 1;
     }
 
@@ -261,7 +262,7 @@ static void timer_cb(uv_timer_t* handle)
                 wc->rotation_after += ACLK_DATABASE_ROTATION_INTERVAL;
         }
 
-        if (wc->chart_updates && !wc->chart_pending) {
+        if (wc->chart_updates && !wc->chart_pending && wc->chart_payload_count) {
             cmd.opcode = ACLK_DATABASE_PUSH_CHART;
             cmd.count = ACLK_MAX_CHART_BATCH;
             cmd.param1 = ACLK_MAX_CHART_BATCH_COUNT;
@@ -333,11 +334,14 @@ void aclk_database_worker(void *arg)
 
     memset(&cmd, 0, sizeof(cmd));
     sql_get_last_chart_sequence(wc, cmd);
+    wc->chart_payload_count = sql_get_pending_count(wc, cmd);
     wc->chart_updates = 0;
     wc->alert_updates = 0;
     wc->startup_time = now_realtime_sec();
     wc->cleanup_after = wc->startup_time + ACLK_DATABASE_CLEANUP_FIRST;
     wc->rotation_after = wc->startup_time + ACLK_DATABASE_ROTATION_DELAY;
+
+    debug(D_ACLK_SYNC,"Node %s reports pending message count = %u", wc->node_id, wc->chart_payload_count);
     while (likely(shutdown == 0)) {
         uv_run(loop, UV_RUN_DEFAULT);
 
@@ -452,6 +456,7 @@ void aclk_database_worker(void *arg)
                         cmd.completion = NULL;
                         wc->node_info_send = aclk_database_enq_cmd_noblock(wc, &cmd);
                     }
+                    //info("DEBUG: %s -- chart payload count = %u", wc->uuid_str, wc->chart_payload_count);
                     break;
                 case ACLK_DATABASE_SHUTDOWN:
                     shutdown = 1;

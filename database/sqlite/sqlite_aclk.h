@@ -151,7 +151,7 @@ struct aclk_database_cmd {
     struct aclk_completion *completion;
 };
 
-#define ACLK_DATABASE_CMD_Q_MAX_SIZE (16384)
+#define ACLK_DATABASE_CMD_Q_MAX_SIZE (512)
 
 struct aclk_database_cmdqueue {
     unsigned head, tail;
@@ -172,6 +172,7 @@ struct aclk_database_worker_config {
     uint64_t alerts_batch_id; // batch id for alerts to use
     uint64_t alerts_start_seq_id; // cloud has asked to start streaming from
     uint64_t alert_sequence_id; // last alert sequence_id
+    uint32_t chart_payload_count;
     uint64_t alerts_snapshot_id; //will contain the snapshot_id value if snapshot was requested
     uint64_t alerts_ack_sequence_id; //last sequence_id ack'ed from cloud via sendsnapshot message
     uv_loop_t *loop;

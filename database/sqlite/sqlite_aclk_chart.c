@@ -12,6 +12,7 @@
 static inline int sql_queue_chart_payload(struct aclk_database_worker_config *wc,
                                           void *data, enum aclk_database_opcode opcode)
 {
+    int rc;
     if (unlikely(!wc))
         return 1;
 
@@ -19,8 +20,8 @@ static inline int sql_queue_chart_payload(struct aclk_database_worker_config *wc
     memset(&cmd, 0, sizeof(cmd));
     cmd.opcode = opcode;
     cmd.data = data;
-    aclk_database_enq_cmd(wc, &cmd);
-    return 0;
+    rc = aclk_database_enq_cmd_noblock(wc, &cmd);
+    return rc;
 }
 
 static int payload_sent(char *uuid_str, uuid_t *uuid, void *payload, size_t payload_size)
@@ -60,13 +61,13 @@ bind_fail:
     return send_status;
 }
 
-static int aclk_add_chart_payload(char *uuid_str, uuid_t *uuid, char *claim_id, ACLK_PAYLOAD_TYPE payload_type,
-                           void *payload, size_t payload_size)
+static int aclk_add_chart_payload(struct aclk_database_worker_config *wc, uuid_t *uuid, char *claim_id,
+                                 ACLK_PAYLOAD_TYPE payload_type, void *payload, size_t payload_size)
 {
     static __thread sqlite3_stmt *res_chart = NULL;
     int rc;
 
-    rc = payload_sent(uuid_str, uuid, payload, payload_size);
+    rc = payload_sent(wc->uuid_str, uuid, payload, payload_size);
     if (rc == 1)
         return 0;
 
@@ -74,7 +75,7 @@ static int aclk_add_chart_payload(char *uuid_str, uuid_t *uuid, char *claim_id, 
         BUFFER *sql = buffer_create(1024);
 
         buffer_sprintf(sql,"INSERT INTO aclk_chart_payload_%s (unique_id, uuid, claim_id, date_created, type, payload) " \
-                            "VALUES (@unique_id, @uuid, @claim_id, strftime('%%s','now'), @type, @payload);", uuid_str);
+                "VALUES (@unique_id, @uuid, @claim_id, strftime('%%s','now'), @type, @payload);", wc->uuid_str);
 
         rc = prepare_statement(db_meta, (char *) buffer_tostring(sql), &res_chart);
         buffer_free(sql);
@@ -115,6 +116,8 @@ static int aclk_add_chart_payload(char *uuid_str, uuid_t *uuid, char *claim_id, 
     rc = execute_insert(res_chart);
     if (unlikely(rc != SQLITE_DONE))
         error_report("Failed store chart payload event, rc = %d", rc);
+    else
+        wc->chart_payload_count++;
 
 bind_fail:
     if (unlikely(sqlite3_reset(res_chart) != SQLITE_OK))
@@ -158,7 +161,7 @@ int aclk_add_chart_event(struct aclk_database_worker_config *wc, struct aclk_dat
         size_t size;
         char *payload = generate_chart_instance_updated(&size, &chart_payload);
         if (likely(payload))
-            rc = aclk_add_chart_payload(wc->uuid_str, st->chart_uuid, claim_id, ACLK_PAYLOAD_CHART, (void *) payload, size);
+            rc = aclk_add_chart_payload(wc, st->chart_uuid, claim_id, ACLK_PAYLOAD_CHART, (void *) payload, size);
         freez(payload);
         chart_instance_updated_destroy(&chart_payload);
     }
@@ -380,6 +383,8 @@ void aclk_send_chart_event(struct aclk_database_worker_config *wc, struct aclk_d
             previous_sequence_id = last_sequence;
             is_dim[count] = sqlite3_column_int(res, 3) > 0;
             count++;
+            if (wc->chart_payload_count)
+                wc->chart_payload_count--;
         }
         freez(payload_list[count]);
         payload_list_max_size[count] = 0;
@@ -663,17 +668,17 @@ void aclk_ack_chart_sequence_id(char *node_id, uint64_t last_sequence_id)
     return;
 }
 
-#ifdef ENABLE_NEW_CLOUD_PROTOCOL
-void aclk_reset_chart_event(char *node_id, uint64_t last_sequence_id)
-{
-    if (unlikely(!node_id))
-        return;
-
-    debug(D_ACLK_SYNC, "NODE %s wants to resync from %"PRIu64, node_id, last_sequence_id);
-    aclk_submit_param_command(node_id, ACLK_DATABASE_RESET_CHART, last_sequence_id);
-    return;
-}
-#endif
+//#ifdef ENABLE_NEW_CLOUD_PROTOCOL
+//void aclk_reset_chart_event(char *node_id, uint64_t last_sequence_id)
+//{
+//    if (unlikely(!node_id))
+//        return;
+//
+//    debug(D_ACLK_SYNC, "NODE %s wants to resync from %"PRIu64, node_id, last_sequence_id);
+//    aclk_submit_param_command(node_id, ACLK_DATABASE_RESET_CHART, last_sequence_id);
+//    return;
+//}
+//#endif
 
 // ST is read locked
 int sql_queue_chart_to_aclk(RRDSET *st)
@@ -769,6 +774,34 @@ void sql_chart_deduplicate(struct aclk_database_worker_config *wc, struct aclk_d
 
     buffer_free(sql);
     return;
+}
+
+uint32_t sql_get_pending_count(struct aclk_database_worker_config *wc, struct aclk_database_cmd cmd)
+{
+    UNUSED(cmd);
+
+    BUFFER *sql = buffer_create(1024);
+    sqlite3_stmt *res = NULL;
+
+    buffer_sprintf(sql,"SELECT count(1) FROM aclk_chart_%s ac WHERE ac.date_submitted IS NULL;", wc->uuid_str);
+
+    int rc;
+    uint32_t chart_payload_count = 0;
+    rc = sqlite3_prepare_v2(db_meta, buffer_tostring(sql), -1, &res, 0);
+    if (rc != SQLITE_OK) {
+        error_report("Failed to prepare statement to count pending messages");
+        goto fail;
+    }
+    while (sqlite3_step(res) == SQLITE_ROW)
+        chart_payload_count = (uint32_t) sqlite3_column_int(res, 0);
+
+    rc = sqlite3_finalize(res);
+    if (unlikely(rc != SQLITE_OK))
+        error_report("Failed to reset statement when fetching pending messages, rc = %d", rc);
+
+fail:
+    buffer_free(sql);
+    return chart_payload_count;
 }
 
 void sql_get_last_chart_sequence(struct aclk_database_worker_config *wc, struct aclk_database_cmd cmd)
