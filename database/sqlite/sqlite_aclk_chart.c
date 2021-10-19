@@ -870,7 +870,7 @@ void aclk_start_streaming(char *node_id, uint64_t sequence_id, time_t created_at
                 wc->batch_created = now_realtime_sec();
                 if (sequence_id > wc->chart_sequence_id || wc->chart_reset_count > 10) {
                     info("Requesting full resync from the cloud for node id %s "
-                         "(reset_count=%d, remote_seq=%"PRIu64" local_seq=%"PRIu64")"
+                         "(reset=%d, remote_seq=%"PRIu64", local_seq=%"PRIu64")"
                          , wc->node_id, wc->chart_reset_count, sequence_id, wc->chart_sequence_id);
                     chart_reset_t chart_reset;
                     chart_reset.claim_id = is_agent_claimed();
@@ -893,8 +893,8 @@ void aclk_start_streaming(char *node_id, uint64_t sequence_id, time_t created_at
                         aclk_database_enq_cmd(wc, &cmd);
                     }
                     else {
-                        debug(D_ACLK_SYNC,"START streaming charts for %s enabled -- last streamed sequence %"PRIu64 \
-                              " t=%ld (reset count=%d)", wc->host_guid, wc->chart_sequence_id,
+                        info("START streaming charts for %s enabled -- last streamed sequence %"PRIu64 \
+                              " t=%ld (reset count=%d)", wc->node_id, wc->chart_sequence_id,
                               wc->chart_timestamp, wc->chart_reset_count);
                         wc->chart_reset_count = 0;
                         wc->chart_updates = 1;
