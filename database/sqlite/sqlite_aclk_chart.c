@@ -869,7 +869,9 @@ void aclk_start_streaming(char *node_id, uint64_t sequence_id, time_t created_at
                 __sync_synchronize();
                 wc->batch_created = now_realtime_sec();
                 if (sequence_id > wc->chart_sequence_id || wc->chart_reset_count > 10) {
-                    debug(D_ACLK_SYNC,"Requesting full resync from the cloud -- reset_count=%d", wc->chart_reset_count);
+                    info("Requesting full resync from the cloud for node id %s "
+                         "(reset_count=%d, remote_seq=%"PRIu64" local_seq=%"PRIu64")"
+                         , wc->node_id, wc->chart_reset_count, sequence_id, wc->chart_sequence_id);
                     chart_reset_t chart_reset;
                     chart_reset.claim_id = is_agent_claimed();
                     if (chart_reset.claim_id) {

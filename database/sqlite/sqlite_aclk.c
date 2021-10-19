@@ -262,7 +262,7 @@ static void timer_cb(uv_timer_t* handle)
                 wc->rotation_after += ACLK_DATABASE_ROTATION_INTERVAL;
         }
 
-        if (wc->chart_updates && !wc->chart_pending && wc->chart_payload_count) {
+        if (wc->chart_updates && !wc->chart_pending) {
             cmd.opcode = ACLK_DATABASE_PUSH_CHART;
             cmd.count = ACLK_MAX_CHART_BATCH;
             cmd.param1 = ACLK_MAX_CHART_BATCH_COUNT;
