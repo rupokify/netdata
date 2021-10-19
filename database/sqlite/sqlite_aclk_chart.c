@@ -179,6 +179,9 @@ static inline int aclk_upd_dimension_event(struct aclk_database_worker_config *w
     int rc = 0;
     size_t size;
 
+    if (unlikely(!dim_uuid || !dim_id || !dim_name || !chart_name))
+        return 0;
+
     struct chart_dimension_updated dim_payload;
     memset(&dim_payload, 0, sizeof(dim_payload));
 

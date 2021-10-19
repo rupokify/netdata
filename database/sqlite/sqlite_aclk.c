@@ -86,7 +86,7 @@ int aclk_database_enq_cmd_noblock(struct aclk_database_worker_config *wc, struct
     uv_mutex_lock(&wc->cmd_mutex);
     if ((queue_size = wc->queue_size) == ACLK_DATABASE_CMD_Q_MAX_SIZE) {
         uv_mutex_unlock(&wc->cmd_mutex);
-        info("DEBUG: %s command queue is full", wc->uuid_str);
+        //info("DEBUG: %s command queue is full", wc->uuid_str);
         return 1;
     }
 
