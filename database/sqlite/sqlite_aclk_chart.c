@@ -586,17 +586,18 @@ void aclk_receive_chart_reset(struct aclk_database_worker_config *wc, struct acl
         RRDSET *st;
         rrdset_foreach_read(st, host) {
             rrdset_rdlock(st);
+            rrdset_flag_clear(st, RRDSET_FLAG_ACLK);
             RRDDIM *rd;
             rrddim_foreach_read(rd, st) {
                 rd->state->aclk_live_status = (rd->state->aclk_live_status == 0);
             }
-            rrdset_flag_clear(st, RRDSET_FLAG_ACLK);
             rrdset_unlock(st);
         }
         rrdhost_unlock(host);
     }
     else {
         //sql_chart_deduplicate(wc, cmd);
+        info("Restarting chart sync for %s from sequence=%"PRIu64, wc->uuid_str, cmd.param1);
         sql_get_last_chart_sequence(wc, cmd);
     }
     buffer_free(sql);

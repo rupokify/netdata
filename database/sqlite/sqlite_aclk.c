@@ -166,9 +166,13 @@ int aclk_worker_enq_cmd(char *node_id, struct aclk_database_cmd *cmd)
             break;
         wc = wc->next;
     }
-    if (wc)
-        aclk_database_enq_cmd(wc, cmd);
     uv_mutex_unlock(&aclk_async_lock);
+    if (wc) {
+        if (aclk_database_enq_cmd_noblock(wc, cmd)) {
+            info("DEBUG: %s aclk_worker_enq_cmd would block", wc->host_guid);
+            aclk_database_enq_cmd(wc, cmd);
+        }
+    }
     return (wc == NULL);
 }
 
@@ -266,8 +270,18 @@ static void timer_cb(uv_timer_t* handle)
             cmd.opcode = ACLK_DATABASE_PUSH_CHART;
             cmd.count = ACLK_MAX_CHART_BATCH;
             cmd.param1 = ACLK_MAX_CHART_BATCH_COUNT;
-            if (!aclk_database_enq_cmd_noblock(wc, &cmd))
+            if (!aclk_database_enq_cmd_noblock(wc, &cmd)) {
+                if (wc->error)
+                    info("Queued chart/dimension payload command %s, error count = %d", wc->host_guid, wc->error);
                 wc->chart_pending = 1;
+                wc->error = 0;
+            }
+            else {
+                wc->error++;
+                if (wc->error % 100 == 0)
+                    error_report("Failed to queue chart/dimension payload command %s, error count = %d",
+                                 wc->host_guid, wc->error);
+            }
         }
 
         if (wc->alert_updates) {
