@@ -289,7 +289,7 @@ int aclk_add_dimension_event(struct aclk_database_worker_config *wc, struct aclk
             &rd->state->metric_uuid,
             rd->id,
             rd->name,
-            rd->rrdset->name,
+            rd->rrdset->id,
             first_t,
             live ? 0 : last_t);
 
